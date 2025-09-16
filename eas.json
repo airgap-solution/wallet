@@ -1,0 +1,11 @@
+{
+  "build": {
+    "preview": {
+      "android": {
+        "debuggable": false,
+        "minifyEnabled": true,
+        "buildType": "apk"
+      }
+    }
+  }
+}
