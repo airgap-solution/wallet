@@ -1,9 +1,10 @@
 {
+  "cli": {
+    "version": ">= 3.0.0"
+  },
   "build": {
     "preview": {
       "android": {
-        "debuggable": false,
-        "minifyEnabled": true,
         "buildType": "apk"
       }
     }
