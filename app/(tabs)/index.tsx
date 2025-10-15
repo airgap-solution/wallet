@@ -1,72 +1,108 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   FlatList,
   Modal,
   View,
-  Text,
-  TextInput,
   Pressable,
   Image,
-  StyleSheet,
   Animated,
+  TextInput,
 } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
-import { ThemedView } from "@/components/ThemedView";
-import CoinCard from "@/components/CoinCard";
-import TransactionModal from "@/components/TransactionModal";
-import TotalBalance from "@/components/TotalBalance";
-import { useAccounts } from "@/contexts/AccountsContext";
-import { useFiat } from "@/contexts/FiatContext";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { MaterialIcons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 
-import { DefaultApi, Configuration } from "@airgap-solution/crypto-wallet-rest";
+import { ThemedView } from "@/components/ThemedView";
+import { ThemedText } from "@/components/ThemedText";
+import CoinCard from "@/components/CoinCard";
+import TransactionModal from "@/components/TransactionModal";
+import TotalBalance from "@/components/TotalBalance";
+import { SkeletonCoinCard } from "@/components/common/SkeletonLoader";
 
-const coinMeta: Record<
-  string,
-  { name: string; symbol: string; image: any; color: string }
-> = {
-  btc: {
-    name: "Bitcoin",
-    symbol: "BTC",
-    image: require("@/assets/coins/btc.png"),
-    color: "#F7931A",
-  },
-  eth: {
-    name: "Ethereum",
-    symbol: "ETH",
-    image: require("@/assets/coins/eth.png"),
-    color: "#627EEA",
-  },
-  kas: {
-    name: "Kaspa",
-    symbol: "KAS",
-    image: require("@/assets/coins/kas.png"),
-    color: "#70C7BA",
-  },
-};
+import { useAccounts } from "@/contexts/AccountsContext";
+import { useFiat } from "@/contexts/FiatContext";
+import { useAppSettings } from "@/contexts/AppSettingsContext";
+import { useTheme } from "@/contexts/ThemeContext";
 
-const api = new DefaultApi(
-  new Configuration({ basePath: "https://api.cwr.restartfu.com" }),
-);
+import { homeScreenStyles } from "@/styles/homeScreen.styles";
+import { theme } from "@/theme";
+import {
+  COIN_META,
+  getCoinMeta,
+  cryptoApi,
+  REFRESH_INTERVALS,
+} from "@/constants/CoinMeta";
+import { generateId, isEmpty } from "@/utils/formatters";
+import { usePressAnimation } from "@/utils/animations";
+
+import type { MappedAccount, BalanceApiResponse } from "@/types";
 
 export default function HomeScreen() {
-  const { accounts, addOrUpdateAccount, clearAccounts } = useAccounts();
+  const { accounts, addOrUpdateAccount, deleteAccount } = useAccounts();
   const { fiat } = useFiat();
+  const { hideSmallBalances, smallBalanceThreshold, refreshInterval } =
+    useAppSettings();
+  const { theme: dynamicTheme } = useTheme();
 
-  const [mappedAccounts, setMappedAccounts] = useState<any[]>([]);
-  const [selectedCoin, setSelectedCoin] = useState<any>(null);
+  // State management
+  const [allMappedAccounts, setAllMappedAccounts] = useState<MappedAccount[]>(
+    [],
+  );
+  const [mappedAccounts, setMappedAccounts] = useState<MappedAccount[]>([]);
+  const [selectedCoin, setSelectedCoin] = useState<MappedAccount | null>(null);
   const [transactionModalVisible, setTransactionModalVisible] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const silentRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [hasInitialLoad, setHasInitialLoad] = useState(false);
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
+  // Add account modal state
   const [addAccountModalVisible, setAddAccountModalVisible] = useState(false);
   const [newAccountType, setNewAccountType] =
-    useState<keyof typeof coinMeta>("btc");
+    useState<keyof typeof COIN_META>("btc");
   const [newAccountXPub, setNewAccountXPub] = useState("");
 
-  const modalScale = useRef(new Animated.Value(0)).current;
+  // Flag to prevent automatic reloads during account addition
+  const [isAddingAccount, setIsAddingAccount] = useState(false);
+  const [inputFocused, setInputFocused] = useState(false);
 
+  // Refs and animations
+  const silentRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const modalScale = useRef(new Animated.Value(0)).current;
+  const {
+    animatedValue: buttonScale,
+    animateIn,
+    animateOut,
+  } = usePressAnimation();
+
+  // Pulse animation for floating button
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+
+  // Start pulse animation
+  useEffect(() => {
+    const pulse = () => {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, {
+            toValue: 1.1,
+            duration: 2000,
+            useNativeDriver: true,
+          }),
+          Animated.timing(pulseAnim, {
+            toValue: 1,
+            duration: 2000,
+            useNativeDriver: true,
+          }),
+        ]),
+      ).start();
+    };
+
+    pulse();
+  }, [pulseAnim]);
+
+  // Modal animation
   useEffect(() => {
     if (addAccountModalVisible) {
       Animated.spring(modalScale, {
@@ -78,187 +114,622 @@ export default function HomeScreen() {
     } else {
       modalScale.setValue(0);
     }
-  }, [addAccountModalVisible]);
+  }, [addAccountModalVisible, modalScale]);
 
-  /** show cards instantly for all accounts, even if price not yet fetched */
+  // Initialize empty cards for all accounts
   useEffect(() => {
-    const initial = accounts.map((acc) => {
-      const symbolForApi = acc.Type.split("_")[0].toUpperCase();
-      const meta = coinMeta[symbolForApi.toLowerCase()] || {
-        name: acc.Type,
-        symbol: symbolForApi,
-        image: require("@/assets/coins/btc.png"),
-        color: "#8b5cf6",
-      };
-      return {
-        id: acc.Wallet.XPub,
-        name: meta.name,
-        symbol: meta.symbol,
-        image: meta.image,
-        color: meta.color,
-        fiatAmount: null,
-        coinAmount: null,
-        fiatCurrency: fiat,
-        change24h: null,
-        raw: acc,
-      };
-    });
-    setMappedAccounts(initial);
-  }, [accounts, fiat]);
+    // Skip initialization if we're adding/deleting accounts
+    if (isAddingAccount || isDeletingAccount) {
+      return;
+    }
 
-  const loadBalances = async (silent = false) => {
-    if (!silent) setRefreshing(true);
+    // Only run when accounts array actually changes (not just context updates)
+    if (isEmpty(accounts)) {
+      setAllMappedAccounts([]);
+      setMappedAccounts([]);
+      return;
+    }
+
+    // Only initialize if we don't have existing mapped accounts or if starting fresh
+    if (allMappedAccounts.length === 0 || !hasInitialLoad) {
+      const initialCards = accounts.map((acc): MappedAccount => {
+        const meta = getCoinMeta(acc.Type);
+        return {
+          id: acc.Wallet.XPub,
+          name: meta.name,
+          symbol: meta.symbol,
+          image: meta.image,
+          color: meta.color,
+          fiatAmount: null,
+          coinAmount: null,
+          fiatCurrency: fiat,
+          change24h: null,
+          raw: acc,
+        };
+      });
+
+      setAllMappedAccounts(initialCards);
+      setMappedAccounts(initialCards);
+    }
+  }, [
+    accounts,
+    fiat,
+    isAddingAccount,
+    isDeletingAccount,
+    allMappedAccounts.length,
+    hasInitialLoad,
+  ]);
+
+  // Load balance data for a single account
+  const loadSingleBalance = useCallback(
+    async (acc: any): Promise<MappedAccount> => {
+      const meta = getCoinMeta(acc.Type);
+      const symbolForApi = acc.Type.split("_")[0].toUpperCase();
+
+      try {
+        const response = await cryptoApi.balanceGet(
+          symbolForApi,
+          acc.Wallet.XPub,
+          fiat.toUpperCase(),
+        );
+
+        const data = response.data as BalanceApiResponse;
+
+        return {
+          id: acc.Wallet.XPub,
+          name: meta.name,
+          symbol: meta.symbol,
+          image: meta.image,
+          color: meta.color,
+          fiatAmount: parseFloat((data.fiat_value ?? 0).toFixed(10)),
+          coinAmount: parseFloat(Number(data.crypto_balance ?? 0).toFixed(10)),
+          fiatCurrency: data.fiat_symbol ?? fiat,
+          change24h: data.change24h ?? 0,
+          raw: acc,
+        };
+      } catch (apiError) {
+        console.warn(
+          `Failed to fetch balance for ${acc.Wallet.XPub}:`,
+          apiError,
+        );
+
+        // Return placeholder data on API failure
+        return {
+          id: acc.Wallet.XPub,
+          name: meta.name,
+          symbol: meta.symbol,
+          image: meta.image,
+          color: meta.color,
+          fiatAmount: 0,
+          coinAmount: 0,
+          fiatCurrency: fiat,
+          change24h: 0,
+          raw: acc,
+        };
+      }
+    },
+    [fiat],
+  );
+
+  // Load balance data from API
+  const loadBalances = useCallback(
+    async (silent = false) => {
+      // Skip loading if we're in the middle of account operations
+      if (isDeletingAccount || isAddingAccount) return;
+
+      if (!silent) {
+        setRefreshing(true);
+      }
+
+      try {
+        const results = await Promise.all(
+          accounts.map((acc) => loadSingleBalance(acc)),
+        );
+
+        // Sort by fiat amount (highest first)
+        results.sort((a, b) => (b.fiatAmount ?? 0) - (a.fiatAmount ?? 0));
+
+        // Store unfiltered results
+        setAllMappedAccounts(results);
+
+        // Apply current filter settings
+        const filteredResults = hideSmallBalances
+          ? results.filter(
+              (account) => (account.fiatAmount ?? 0) >= smallBalanceThreshold,
+            )
+          : results;
+
+        setMappedAccounts(filteredResults);
+        setError(null);
+      } catch (err) {
+        console.error("Failed to load balances:", err);
+        setError("Failed to load account balances");
+      } finally {
+        setRefreshing(false);
+        setHasInitialLoad(true);
+      }
+    },
+    [
+      accounts,
+      hideSmallBalances,
+      smallBalanceThreshold,
+      loadSingleBalance,
+      isDeletingAccount,
+      isAddingAccount,
+    ],
+  );
+
+  // Silent refresh that preserves existing data and only updates values
+  const silentRefreshBalances = useCallback(async () => {
+    if (isDeletingAccount || isAddingAccount) return;
+
     try {
       const results = await Promise.all(
-        accounts.map(async (acc) => {
-          const symbolForApi = acc.Type.split("_")[0].toUpperCase();
-          const meta = coinMeta[symbolForApi.toLowerCase()] || {
-            name: acc.Type,
-            symbol: symbolForApi,
-            image: require("@/assets/coins/btc.png"),
-            color: "#8b5cf6",
-          };
-
-          try {
-            const res = await api.balanceGet(
-              symbolForApi,
-              acc.Wallet.XPub,
-              fiat.toUpperCase(),
-            );
-            const data = res.data;
-
-            const fiatValue = data.fiat_value ?? 0;
-            const coinValue = data.crypto_balance ?? 0;
-
-            return {
-              id: acc.Wallet.XPub,
-              name: meta.name,
-              symbol: meta.symbol,
-              image: meta.image,
-              color: meta.color,
-              fiatAmount: parseFloat(fiatValue.toFixed(10)),
-              coinAmount: parseFloat(Number(coinValue).toFixed(10)),
-              fiatCurrency: data.fiat_symbol ?? fiat,
-              change24h: data.change24h,
-              raw: acc,
-            };
-          } catch {
-            // keep placeholders if request fails
-            return {
-              id: acc.Wallet.XPub,
-              name: meta.name,
-              symbol: meta.symbol,
-              image: meta.image,
-              color: meta.color,
-              fiatAmount: 0,
-              coinAmount: 0,
-              fiatCurrency: fiat,
-              change24h: 0,
-              raw: acc,
-            };
-          }
-        }),
+        accounts.map((acc) => loadSingleBalance(acc)),
       );
 
-      results.sort((a, b) => (b.fiatAmount ?? 0) - (a.fiatAmount ?? 0));
-      setMappedAccounts(results);
-    } finally {
-      if (!silent) setRefreshing(false);
+      // Update existing accounts without changing their loading state
+      setAllMappedAccounts((prev) => {
+        const updated = prev.map((existing) => {
+          const newData = results.find((result) => result.id === existing.id);
+          return newData ? newData : existing;
+        });
+
+        updated.sort((a, b) => (b.fiatAmount ?? 0) - (a.fiatAmount ?? 0));
+        return updated;
+      });
+
+      setMappedAccounts((prev) => {
+        const updated = prev.map((existing) => {
+          const newData = results.find((result) => result.id === existing.id);
+          return newData ? newData : existing;
+        });
+
+        const filtered = hideSmallBalances
+          ? updated.filter(
+              (account) => (account.fiatAmount ?? 0) >= smallBalanceThreshold,
+            )
+          : updated;
+
+        filtered.sort((a, b) => (b.fiatAmount ?? 0) - (a.fiatAmount ?? 0));
+        return filtered;
+      });
+
+      setError(null);
+    } catch (err) {
+      console.error("Failed to refresh balances:", err);
     }
-  };
+  }, [
+    accounts,
+    hideSmallBalances,
+    smallBalanceThreshold,
+    loadSingleBalance,
+    isDeletingAccount,
+    isAddingAccount,
+  ]);
 
+  // Load balances when accounts are first loaded
   useEffect(() => {
-    loadBalances();
-  }, [accounts, fiat]);
+    if (
+      !isEmpty(accounts) &&
+      !hasInitialLoad &&
+      !isDeletingAccount &&
+      !isAddingAccount
+    ) {
+      loadBalances();
+    }
+  }, [
+    loadBalances,
+    hasInitialLoad,
+    accounts,
+    isDeletingAccount,
+    isAddingAccount,
+  ]);
 
+  // Trigger initial load when accounts change from empty to having items
   useEffect(() => {
-    silentRefreshRef.current = setInterval(() => loadBalances(true), 60_000);
-    return () =>
-      silentRefreshRef.current && clearInterval(silentRefreshRef.current);
-  }, [accounts, fiat]);
+    if (
+      !isEmpty(accounts) &&
+      allMappedAccounts.length === 0 &&
+      !isDeletingAccount &&
+      !isAddingAccount
+    ) {
+      loadBalances();
+    }
+  }, [
+    accounts.length,
+    loadBalances,
+    allMappedAccounts.length,
+    isDeletingAccount,
+    accounts,
+    isAddingAccount,
+  ]);
 
-  const handleDelete = (xpub: string) => {
-    const filtered = accounts.filter((a) => a.Wallet.XPub !== xpub);
-    clearAccounts();
-    filtered.forEach((a) => addOrUpdateAccount(a));
-  };
+  // Load balances when fiat currency changes (for existing accounts)
+  useEffect(() => {
+    if (
+      !isEmpty(accounts) &&
+      hasInitialLoad &&
+      !isDeletingAccount &&
+      !isAddingAccount
+    ) {
+      silentRefreshBalances();
+    }
+  }, [
+    silentRefreshBalances,
+    fiat,
+    hasInitialLoad,
+    accounts,
+    isDeletingAccount,
+    isAddingAccount,
+  ]);
 
-  const handleAddAccount = () => {
-    if (!newAccountXPub) return;
-    addOrUpdateAccount({
-      Type: newAccountType,
+  // Setup auto-refresh interval
+  useEffect(() => {
+    if (!isEmpty(accounts) && !isDeletingAccount && !isAddingAccount) {
+      const getRefreshInterval = () => {
+        switch (refreshInterval) {
+          case "5s":
+            return 5000;
+          case "10s":
+            return 10000;
+          case "30s":
+            return 30000;
+          case "1m":
+            return 60000;
+          case "5m":
+            return 300000;
+          default:
+            return REFRESH_INTERVALS.NORMAL;
+        }
+      };
+
+      silentRefreshRef.current = setInterval(
+        () => silentRefreshBalances(),
+        getRefreshInterval(),
+      );
+    }
+
+    return () => {
+      if (silentRefreshRef.current) {
+        clearInterval(silentRefreshRef.current);
+      }
+    };
+  }, [
+    silentRefreshBalances,
+    accounts,
+    isDeletingAccount,
+    isAddingAccount,
+    refreshInterval,
+  ]);
+
+  // Apply filter when settings change
+  useEffect(() => {
+    if (allMappedAccounts.length > 0) {
+      const filteredResults = hideSmallBalances
+        ? allMappedAccounts.filter(
+            (account) => (account.fiatAmount ?? 0) >= smallBalanceThreshold,
+          )
+        : allMappedAccounts;
+
+      setMappedAccounts(filteredResults);
+    }
+  }, [hideSmallBalances, smallBalanceThreshold, allMappedAccounts]);
+
+  // Handlers
+  const handleDeleteAccount = useCallback(
+    (xpub: string) => {
+      // Prevent multiple rapid deletions
+      if (isDeletingAccount) return;
+
+      setIsDeletingAccount(true);
+
+      // Remove from UI immediately
+      setAllMappedAccounts((prev) =>
+        prev.filter((account) => account.raw?.Wallet?.XPub !== xpub),
+      );
+      setMappedAccounts((prev) =>
+        prev.filter((account) => account.raw?.Wallet?.XPub !== xpub),
+      );
+
+      // Remove from context
+      deleteAccount(xpub);
+
+      setTimeout(() => {
+        setIsDeletingAccount(false);
+      }, 100);
+    },
+    [deleteAccount, isDeletingAccount],
+  );
+
+  const handleAddAccount = useCallback(async () => {
+    if (isEmpty(newAccountXPub.trim())) return;
+
+    // Prevent multiple rapid additions
+    if (isAddingAccount) return;
+
+    const xpub = newAccountXPub.trim();
+
+    // Check for duplicates in current state
+    const existingAccount = allMappedAccounts.find(
+      (account) => account.raw?.Wallet?.XPub === xpub,
+    );
+
+    if (existingAccount) {
+      console.log("⚠️ Account already exists, skipping...");
+      setNewAccountXPub("");
+      setNewAccountType("btc");
+      setAddAccountModalVisible(false);
+      return;
+    }
+
+    setIsAddingAccount(true);
+
+    const newAccount = {
+      ID: generateId(),
+      Index: 0,
+      Type: newAccountType as string,
+      Block: 0,
       Wallet: {
-        XPub: newAccountXPub,
+        XPub: xpub,
         DerivationPath: "",
         ChainCode: "",
         Name: "",
-        Internal1: "",
-        Internal2: "",
+        Internal1: false,
+        Internal2: false,
+        SomeBytes: "",
       },
+    };
+
+    // Create placeholder entry with loading state
+    const meta = getCoinMeta(newAccount.Type);
+    const placeholder: MappedAccount = {
+      id: newAccount.Wallet.XPub,
+      name: meta.name,
+      symbol: meta.symbol,
+      image: meta.image,
+      color: meta.color,
+      fiatAmount: null, // null indicates loading
+      coinAmount: null,
+      fiatCurrency: fiat,
+      change24h: null,
+      raw: newAccount,
+    };
+
+    // Add placeholder to UI immediately
+    setAllMappedAccounts((prev) => [...prev, placeholder]);
+    setMappedAccounts((prev) => {
+      const updated = [...prev, placeholder];
+      return hideSmallBalances
+        ? updated.filter(
+            (account) => (account.fiatAmount ?? 0) >= smallBalanceThreshold,
+          )
+        : updated;
     });
+
+    // Close modal immediately
     setNewAccountXPub("");
     setNewAccountType("btc");
     setAddAccountModalVisible(false);
-  };
 
+    // Add account to context
+    try {
+      await addOrUpdateAccount(newAccount);
+
+      // Fetch balance for ONLY this new account in background
+      const newAccountData = await loadSingleBalance(newAccount);
+      setAllMappedAccounts((prev) =>
+        prev.map((account) =>
+          account.id === newAccount.Wallet.XPub ? newAccountData : account,
+        ),
+      );
+      setMappedAccounts((prev) => {
+        const updated = prev.map((account) =>
+          account.id === newAccount.Wallet.XPub ? newAccountData : account,
+        );
+        return hideSmallBalances
+          ? updated.filter(
+              (account) => (account.fiatAmount ?? 0) >= smallBalanceThreshold,
+            )
+          : updated;
+      });
+    } catch (error) {
+      console.error("Failed to add account:", error);
+    } finally {
+      setIsAddingAccount(false);
+    }
+  }, [
+    newAccountXPub,
+    newAccountType,
+    allMappedAccounts,
+    addOrUpdateAccount,
+    fiat,
+    loadSingleBalance,
+    hideSmallBalances,
+    smallBalanceThreshold,
+    isAddingAccount,
+  ]);
+
+  const handleCoinPress = useCallback((coin: MappedAccount) => {
+    setSelectedCoin(coin);
+    setTransactionModalVisible(true);
+  }, []);
+
+  const handleRetry = useCallback(() => {
+    loadBalances(false);
+  }, [loadBalances]);
+
+  const handlePullToRefresh = useCallback(() => {
+    if (isDeletingAccount || isAddingAccount) return;
+    silentRefreshBalances();
+  }, [silentRefreshBalances, isDeletingAccount, isAddingAccount]);
+
+  // Calculate portfolio totals
   const totalFiat = mappedAccounts.reduce(
     (acc, curr) => acc + (curr.fiatAmount ?? 0),
     0,
   );
+
   const totalChangeFiat = mappedAccounts.reduce(
     (acc, curr) => acc + (curr.change24h ?? 0),
     0,
   );
+
   const totalPercentChange = totalFiat
     ? (totalChangeFiat / totalFiat) * 100
     : 0;
 
+  // Check if we're hiding any accounts due to small balance filter
+  const hiddenAccountsCount = hideSmallBalances
+    ? allMappedAccounts.length - mappedAccounts.length
+    : 0;
+
+  // Render functions
+  const renderCoinCard = useCallback(
+    ({ item }: { item: MappedAccount }) => (
+      <CoinCard
+        coin={item}
+        onPress={() => handleCoinPress(item)}
+        onDelete={handleDeleteAccount}
+      />
+    ),
+    [handleCoinPress, handleDeleteAccount],
+  );
+
+  const renderEmptyState = () => (
+    <View style={homeScreenStyles.emptyState}>
+      <MaterialIcons
+        name="account-balance-wallet"
+        size={theme.dimensions.iconSize.xxl}
+        color={theme.colors.text.tertiary}
+      />
+      <ThemedText style={homeScreenStyles.emptyStateText}>
+        {hideSmallBalances && allMappedAccounts.length > 0
+          ? `All ${allMappedAccounts.length} accounts are hidden due to small balance filter.`
+          : "No accounts added yet.\nTap the + button to add your first cryptocurrency account."}
+      </ThemedText>
+      {hideSmallBalances && allMappedAccounts.length > 0 && (
+        <ThemedText style={homeScreenStyles.emptyStateSubtext}>
+          Accounts with balances under {smallBalanceThreshold} {fiat} are
+          hidden. Adjust this in Settings.
+        </ThemedText>
+      )}
+    </View>
+  );
+
+  const renderLoadingState = () => (
+    <View style={homeScreenStyles.loadingContainer}>
+      {Array.from({ length: 3 }).map((_, index) => (
+        <SkeletonCoinCard key={index} />
+      ))}
+    </View>
+  );
+
+  const renderError = () => (
+    <View style={homeScreenStyles.errorContainer}>
+      <MaterialIcons
+        name="error-outline"
+        size={theme.dimensions.iconSize.lg}
+        color={theme.colors.error}
+      />
+      <ThemedText style={homeScreenStyles.errorText}>{error}</ThemedText>
+      <Pressable onPress={handleRetry} style={homeScreenStyles.retryButton}>
+        <ThemedText style={homeScreenStyles.retryButtonText}>Retry</ThemedText>
+      </Pressable>
+    </View>
+  );
+
+  const insets = useSafeAreaInsets();
+
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <ThemedView style={styles.container}>
-        <TotalBalance
-          total={totalFiat}
-          changePercent={totalPercentChange}
-          fiat={fiat}
-        />
-
-        {/* Show all cards (even if price missing) */}
-        <FlatList
-          data={mappedAccounts}
-          keyExtractor={(item) => item.id}
-          renderItem={({ item }) => (
-            <CoinCard
-              coin={item}
-              onPress={() => {
-                setSelectedCoin(item);
-                setTransactionModalVisible(true);
-              }}
-              onDelete={handleDelete}
-            />
-          )}
-          refreshing={refreshing}
-          onRefresh={() => loadBalances(false)}
-          contentContainerStyle={{ paddingBottom: 100 }}
-        />
+      <ThemedView
+        style={[
+          homeScreenStyles.container,
+          { paddingTop: insets.top, paddingBottom: insets.bottom },
+        ]}
+      >
+        {error ? (
+          renderError()
+        ) : isEmpty(accounts) ? (
+          renderEmptyState()
+        ) : isLoading && isEmpty(mappedAccounts) ? (
+          renderLoadingState()
+        ) : isEmpty(mappedAccounts) && hideSmallBalances ? (
+          renderEmptyState()
+        ) : (
+          <FlatList
+            data={mappedAccounts}
+            keyExtractor={(item) => item.id}
+            renderItem={renderCoinCard}
+            refreshing={refreshing}
+            onRefresh={handlePullToRefresh}
+            contentContainerStyle={homeScreenStyles.listContainer}
+            showsVerticalScrollIndicator={false}
+            showsHorizontalScrollIndicator={false}
+            bounces={true}
+            alwaysBounceVertical={true}
+            maintainVisibleContentPosition={{
+              minIndexForVisible: 0,
+            }}
+            ListHeaderComponent={
+              <View>
+                <TotalBalance
+                  total={totalFiat}
+                  changePercent={totalPercentChange}
+                  fiat={fiat}
+                  isLoading={isLoading && !hasInitialLoad}
+                />
+                {hiddenAccountsCount > 0 && (
+                  <View style={homeScreenStyles.filterNotification}>
+                    <MaterialIcons
+                      name="visibility-off"
+                      size={16}
+                      color={theme.colors.text.tertiary}
+                    />
+                    <ThemedText style={homeScreenStyles.filterNotificationText}>
+                      {hiddenAccountsCount} account
+                      {hiddenAccountsCount > 1 ? "s" : ""} hidden (balance under{" "}
+                      {smallBalanceThreshold} {fiat})
+                    </ThemedText>
+                  </View>
+                )}
+              </View>
+            }
+          />
+        )}
 
         {/* Floating Add Button */}
-        <Pressable
-          onPress={() => setAddAccountModalVisible(true)}
-          style={({ pressed }) => [
-            styles.floatingButton,
-            pressed && styles.floatingButtonPressed,
-          ]}
+        <Animated.View
+          style={{
+            transform: [{ scale: buttonScale }, { scale: pulseAnim }],
+          }}
         >
-          <LinearGradient
-            colors={["#8b5cf6", "#3b82f6"]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.floatingButtonGradient}
+          <Pressable
+            onPress={() => setAddAccountModalVisible(true)}
+            onPressIn={animateIn}
+            onPressOut={animateOut}
+            style={({ pressed }) => [
+              homeScreenStyles.floatingButton,
+              pressed && homeScreenStyles.floatingButtonPressed,
+            ]}
           >
-            <MaterialIcons name="add" size={32} color="#fff" />
-          </LinearGradient>
-        </Pressable>
+            <LinearGradient
+              colors={dynamicTheme.colors.gradients.primary as any}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={homeScreenStyles.floatingButtonGradient}
+            >
+              <MaterialIcons
+                name="add"
+                size={32}
+                color={theme.colors.text.primary}
+              />
+            </LinearGradient>
+          </Pressable>
+        </Animated.View>
 
+        {/* Transaction Modal */}
         <TransactionModal
           visible={transactionModalVisible}
           onClose={() => setTransactionModalVisible(false)}
@@ -273,274 +744,141 @@ export default function HomeScreen() {
           onRequestClose={() => setAddAccountModalVisible(false)}
         >
           <Pressable
-            style={styles.modalOverlay}
+            style={homeScreenStyles.modalOverlay}
             onPress={() => setAddAccountModalVisible(false)}
           >
-            <Animated.View
-              style={[
-                styles.modalContent,
-                { transform: [{ scale: modalScale }] },
-              ]}
-              onStartShouldSetResponder={() => true}
-            >
-              {/* Header */}
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Add Account</Text>
-                <Pressable
-                  onPress={() => setAddAccountModalVisible(false)}
-                  style={styles.closeButton}
-                >
-                  <MaterialIcons
-                    name="close"
-                    size={24}
-                    color="rgba(255, 255, 255, 0.7)"
-                  />
-                </Pressable>
-              </View>
+            <Pressable onPress={() => {}}>
+              <Animated.View
+                style={[
+                  homeScreenStyles.modalContent,
+                  { transform: [{ scale: modalScale }] },
+                ]}
+              >
+                {/* Header */}
+                <View style={homeScreenStyles.modalHeader}>
+                  <ThemedText style={homeScreenStyles.modalTitle}>
+                    Add Account
+                  </ThemedText>
+                  <Pressable
+                    onPress={() => setAddAccountModalVisible(false)}
+                    style={homeScreenStyles.closeButton}
+                  >
+                    <MaterialIcons
+                      name="close"
+                      size={24}
+                      color={theme.colors.text.secondary}
+                    />
+                  </Pressable>
+                </View>
 
-              {/* Coin Selector */}
-              <Text style={styles.sectionLabel}>Select Cryptocurrency</Text>
-              <View style={styles.coinSelector}>
-                {Object.entries(coinMeta).map(([key, meta]) => {
-                  const selected = key === newAccountType;
-                  return (
-                    <Pressable
-                      key={key}
-                      onPress={() =>
-                        setNewAccountType(key as keyof typeof coinMeta)
-                      }
-                      style={[
-                        styles.coinOption,
-                        selected && styles.coinOptionSelected,
-                      ]}
-                    >
-                      <Image
-                        source={meta.image}
-                        style={styles.coinOptionImage}
-                      />
-                      <Text
+                {/* Coin Selector */}
+                <ThemedText style={homeScreenStyles.sectionLabel}>
+                  Select Cryptocurrency
+                </ThemedText>
+                <View style={homeScreenStyles.coinSelector}>
+                  {Object.entries(COIN_META).map(([key, meta]) => {
+                    const selected = key === newAccountType;
+                    return (
+                      <Pressable
+                        key={key}
+                        onPress={() =>
+                          setNewAccountType(key as keyof typeof COIN_META)
+                        }
                         style={[
-                          styles.coinOptionText,
-                          selected && styles.coinOptionTextSelected,
+                          homeScreenStyles.coinOption,
+                          selected && homeScreenStyles.coinOptionSelected,
                         ]}
                       >
-                        {meta.name}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
+                        <Image
+                          source={meta.image}
+                          style={homeScreenStyles.coinOptionImage}
+                        />
+                        <ThemedText
+                          style={[
+                            homeScreenStyles.coinOptionText,
+                            selected && homeScreenStyles.coinOptionTextSelected,
+                          ]}
+                        >
+                          {meta.name}
+                        </ThemedText>
+                      </Pressable>
+                    );
+                  })}
+                </View>
 
-              {/* Input */}
-              <Text style={styles.sectionLabel}>Address / XPub</Text>
-              <View style={styles.inputContainer}>
-                <MaterialIcons
-                  name="account-balance-wallet"
-                  size={20}
-                  color="rgba(255, 255, 255, 0.4)"
-                  style={styles.inputIcon}
-                />
-                <TextInput
-                  placeholder="Enter XPub or Address"
-                  placeholderTextColor="rgba(255, 255, 255, 0.4)"
-                  value={newAccountXPub}
-                  onChangeText={setNewAccountXPub}
-                  style={styles.input}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                />
-              </View>
-
-              {/* Actions */}
-              <View style={styles.modalActions}>
-                <Pressable
-                  onPress={() => setAddAccountModalVisible(false)}
-                  style={styles.cancelButton}
-                >
-                  <Text style={styles.cancelButtonText}>Cancel</Text>
-                </Pressable>
-                <Pressable
-                  onPress={handleAddAccount}
+                {/* Input */}
+                <ThemedText style={homeScreenStyles.sectionLabel}>
+                  Address / XPub
+                </ThemedText>
+                <View
                   style={[
-                    styles.confirmButton,
-                    !newAccountXPub && styles.confirmButtonDisabled,
+                    homeScreenStyles.inputContainer,
+                    inputFocused && homeScreenStyles.inputContainerFocused,
                   ]}
-                  disabled={!newAccountXPub}
                 >
-                  <LinearGradient
-                    colors={
-                      newAccountXPub ? ["#8b5cf6", "#3b82f6"] : ["#444", "#444"]
+                  <MaterialIcons
+                    name="account-balance-wallet"
+                    size={20}
+                    color={
+                      inputFocused ? "#6366f1" : theme.colors.text.tertiary
                     }
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 0 }}
-                    style={styles.confirmButtonGradient}
+                    style={homeScreenStyles.inputIcon}
+                  />
+                  <TextInput
+                    style={homeScreenStyles.input}
+                    value={newAccountXPub}
+                    onChangeText={setNewAccountXPub}
+                    onFocus={() => setInputFocused(true)}
+                    onBlur={() => setInputFocused(false)}
+                    placeholder="Enter XPub or Address"
+                    placeholderTextColor={theme.colors.text.tertiary}
+                    multiline={true}
+                    numberOfLines={2}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                  />
+                </View>
+
+                {/* Actions */}
+                <View style={homeScreenStyles.modalActions}>
+                  <Pressable
+                    onPress={() => setAddAccountModalVisible(false)}
+                    style={homeScreenStyles.cancelButton}
                   >
-                    <Text style={styles.confirmButtonText}>Add Account</Text>
-                  </LinearGradient>
-                </Pressable>
-              </View>
-            </Animated.View>
+                    <ThemedText style={homeScreenStyles.cancelButtonText}>
+                      Cancel
+                    </ThemedText>
+                  </Pressable>
+                  <Pressable
+                    onPress={handleAddAccount}
+                    style={[
+                      homeScreenStyles.confirmButton,
+                      (isEmpty(newAccountXPub) || isAddingAccount) &&
+                        homeScreenStyles.confirmButtonDisabled,
+                    ]}
+                    disabled={isEmpty(newAccountXPub) || isAddingAccount}
+                  >
+                    <LinearGradient
+                      colors={
+                        !isEmpty(newAccountXPub) && !isAddingAccount
+                          ? (dynamicTheme.colors.gradients.primary as any)
+                          : (["#444", "#444"] as any)
+                      }
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 0 }}
+                      style={homeScreenStyles.confirmButtonGradient}
+                    >
+                      <ThemedText style={homeScreenStyles.confirmButtonText}>
+                        {isAddingAccount ? "Adding..." : "Add Account"}
+                      </ThemedText>
+                    </LinearGradient>
+                  </Pressable>
+                </View>
+              </Animated.View>
+            </Pressable>
           </Pressable>
         </Modal>
       </ThemedView>
     </GestureHandlerRootView>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    paddingHorizontal: 16,
-    paddingTop: 48,
-    backgroundColor: "#121212",
-  },
-  floatingButton: {
-    position: "absolute",
-    bottom: 24,
-    right: 24,
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    elevation: 8,
-    shadowColor: "#8b5cf6",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 12,
-  },
-  floatingButtonPressed: {
-    transform: [{ scale: 0.95 }],
-  },
-  floatingButtonGradient: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  modalOverlay: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: "rgba(0, 0, 0, 0.8)",
-    padding: 20,
-  },
-  modalContent: {
-    backgroundColor: "rgba(30, 30, 30, 0.95)",
-    borderRadius: 24,
-    width: "100%",
-    maxWidth: 400,
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.1)",
-    padding: 24,
-  },
-  modalHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 24,
-  },
-  modalTitle: {
-    fontSize: 24,
-    color: "#fff",
-    fontWeight: "700",
-  },
-  closeButton: {
-    padding: 4,
-  },
-  sectionLabel: {
-    fontSize: 13,
-    color: "rgba(255, 255, 255, 0.6)",
-    fontWeight: "600",
-    textTransform: "uppercase",
-    letterSpacing: 1,
-    marginBottom: 12,
-  },
-  coinSelector: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 10,
-    marginBottom: 24,
-  },
-  coinOption: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 12,
-    backgroundColor: "rgba(255, 255, 255, 0.05)",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.1)",
-  },
-  coinOptionSelected: {
-    backgroundColor: "rgba(139, 92, 246, 0.2)",
-    borderColor: "rgba(139, 92, 246, 0.5)",
-  },
-  coinOptionImage: {
-    width: 24,
-    height: 24,
-    marginRight: 8,
-  },
-  coinOptionText: {
-    color: "rgba(255, 255, 255, 0.7)",
-    fontWeight: "500",
-    fontSize: 14,
-  },
-  coinOptionTextSelected: {
-    color: "#a78bfa",
-    fontWeight: "700",
-  },
-  inputContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "rgba(255, 255, 255, 0.05)",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.1)",
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    marginBottom: 24,
-  },
-  inputIcon: {
-    marginRight: 8,
-  },
-  input: {
-    flex: 1,
-    padding: 14,
-    color: "#fff",
-    fontSize: 14,
-  },
-  modalActions: {
-    flexDirection: "row",
-    gap: 12,
-  },
-  cancelButton: {
-    flex: 1,
-    backgroundColor: "rgba(255, 255, 255, 0.05)",
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.1)",
-  },
-  cancelButtonText: {
-    color: "rgba(255, 255, 255, 0.7)",
-    fontSize: 15,
-    fontWeight: "600",
-  },
-  confirmButton: {
-    flex: 1,
-    borderRadius: 12,
-    overflow: "hidden",
-  },
-  confirmButtonDisabled: {
-    opacity: 0.5,
-  },
-  confirmButtonGradient: {
-    paddingVertical: 14,
-    alignItems: "center",
-  },
-  confirmButtonText: {
-    color: "#fff",
-    fontSize: 15,
-    fontWeight: "700",
-  },
-});

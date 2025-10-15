@@ -1,487 +1,405 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useRef } from "react";
 import {
   View,
   TouchableOpacity,
-  Image,
-  StyleSheet,
   Animated,
-  Easing,
   PanResponder,
+  Image,
 } from "react-native";
 import { Feather, MaterialIcons } from "@expo/vector-icons";
+
 import { ThemedText } from "./ThemedText";
-import { LinearGradient } from "expo-linear-gradient";
-import Svg, {
-  Defs,
-  ClipPath,
-  Polygon,
-  Image as SvgImage,
-} from "react-native-svg";
+import { SkeletonLine } from "./common/SkeletonLoader";
+import { formatCurrency, formatCryptoAmount } from "@/utils/formatters";
+import { BiometricAuthService } from "@/services/BiometricAuth";
+import { usePressAnimation, useFlashOnChange } from "@/utils/animations";
+import { useAppSettings } from "@/contexts/AppSettingsContext";
+import { coinCardStyles } from "@/styles/coinCard.styles";
+import { theme } from "@/theme";
+import type { CoinCardProps } from "@/types";
 
-const formatCurrency = (amount: number, currency: string) =>
-  new Intl.NumberFormat("en-CA", {
-    style: "currency",
-    currency,
-    maximumFractionDigits: 2,
-    minimumFractionDigits: 2,
-  }).format(amount);
-
-// Enhanced shimmer skeleton
-const SkeletonLine = ({ width, height, style }: any) => {
-  const shimmer = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(shimmer, {
-          toValue: 1,
-          duration: 1500,
-          easing: Easing.ease,
-          useNativeDriver: false,
-        }),
-        Animated.timing(shimmer, {
-          toValue: 0,
-          duration: 1500,
-          easing: Easing.ease,
-          useNativeDriver: false,
-        }),
-      ]),
-    ).start();
-  }, []);
-
-  const backgroundColor = shimmer.interpolate({
-    inputRange: [0, 1],
-    outputRange: ["rgba(255, 255, 255, 0.05)", "rgba(255, 255, 255, 0.15)"],
-  });
-
-  return (
-    <Animated.View
-      style={[
-        {
-          width,
-          height,
-          borderRadius: 8,
-          backgroundColor,
-        },
-        style,
-      ]}
-    />
-  );
-};
-
-export default function CoinCard({ coin, onPress, onDelete }: any) {
+export default function CoinCard({ coin, onPress, onDelete }: CoinCardProps) {
   const [hideBalance, setHideBalance] = useState(false);
-  const prevFiat = useRef<number | null>(null);
-  const flashAnim = useRef(new Animated.Value(0)).current;
-  const pressAnim = useRef(new Animated.Value(1)).current;
-  const translateX = useRef(new Animated.Value(0)).current;
+  const { numberFormat, biometricEnabled } = useAppSettings();
 
-  // Flash animation when fiat balance changes
-  useEffect(() => {
-    if (
-      prevFiat.current !== null &&
-      coin.fiatAmount !== prevFiat.current &&
-      coin.fiatAmount != null
-    ) {
-      flashAnim.setValue(0);
-      Animated.timing(flashAnim, {
-        toValue: 1,
-        duration: 600,
-        useNativeDriver: false,
-      }).start(() => flashAnim.setValue(0));
-    }
-    prevFiat.current = coin.fiatAmount;
-  }, [coin.fiatAmount]);
+  // Animations
+  const {
+    animatedValue: pressAnim,
+    animateIn,
+    animateOut,
+  } = usePressAnimation();
+  const translateX = useRef(new Animated.Value(0)).current;
+  const flashAnim = useFlashOnChange(coin.fiatAmount);
+
+  const isLoading = coin.fiatAmount === null || coin.fiatAmount === undefined;
+  const change24h = coin.change24h ?? 0;
+  const changeIsPositive = change24h > 0;
+  const changeIsNegative = change24h < 0;
 
   const flashColor = flashAnim.interpolate({
     inputRange: [0, 1],
     outputRange: [
-      "#ffffff",
-      coin.fiatAmount > (prevFiat.current || 0) ? "#4ade80" : "#f87171",
+      theme.colors.text.primary,
+      changeIsPositive
+        ? theme.colors.success
+        : changeIsNegative
+          ? theme.colors.error
+          : theme.colors.text.secondary,
     ],
   });
 
-  // Pan responder for swipe
+  // Pan responder for smooth swipe-to-delete gestures
   const panResponder = useRef(
     PanResponder.create({
-      onMoveShouldSetPanResponder: (_, gestureState) => {
-        return Math.abs(gestureState.dx) > 5;
+      onMoveShouldSetPanResponder: (evt, gestureState) => {
+        // Only respond to horizontal swipes with significant movement
+        return (
+          Math.abs(gestureState.dx) > Math.abs(gestureState.dy) &&
+          Math.abs(gestureState.dx) > 15
+        );
       },
-      onPanResponderMove: (_, gestureState) => {
-        if (gestureState.dx < 0) {
-          translateX.setValue(Math.max(gestureState.dx, -80));
-        }
+      onPanResponderGrant: () => {
+        // Start the gesture - flatten any existing offset
+        translateX.setOffset((translateX as any)._value);
+        translateX.setValue(0);
       },
-      onPanResponderRelease: (_, gestureState) => {
-        if (gestureState.dx < -40) {
+      onPanResponderMove: (evt, gestureState) => {
+        // Only allow swiping left (negative dx) with smooth animation
+        const newValue = Math.max(Math.min(gestureState.dx, 0), -120);
+        translateX.setValue(newValue);
+      },
+      onPanResponderRelease: (evt, gestureState) => {
+        translateX.flattenOffset();
+
+        // Determine threshold based on swipe distance and velocity
+        const swipeThreshold = gestureState.vx < -0.5 ? -40 : -60;
+
+        if (gestureState.dx < swipeThreshold) {
+          // Swipe far enough or fast enough to reveal delete
           Animated.spring(translateX, {
-            toValue: -80,
+            toValue: -120,
+            tension: 100,
+            friction: 8,
             useNativeDriver: true,
           }).start();
         } else {
+          // Snap back to original position
           Animated.spring(translateX, {
             toValue: 0,
+            tension: 100,
+            friction: 8,
             useNativeDriver: true,
           }).start();
         }
+      },
+      onPanResponderTerminate: () => {
+        // Reset if gesture is terminated
+        translateX.flattenOffset();
+        Animated.spring(translateX, {
+          toValue: 0,
+          tension: 100,
+          friction: 8,
+          useNativeDriver: true,
+        }).start();
       },
     }),
   ).current;
 
-  const handlePressIn = () => {
-    Animated.spring(pressAnim, {
-      toValue: 0.98,
-      useNativeDriver: true,
-    }).start();
-  };
-
-  const handlePressOut = () => {
-    Animated.spring(pressAnim, {
-      toValue: 1,
-      friction: 3,
-      tension: 40,
-      useNativeDriver: true,
-    }).start();
-  };
-
-  const handleDelete = () => {
+  const handleDelete = async () => {
+    // Animate back to original position first
     Animated.spring(translateX, {
       toValue: 0,
       useNativeDriver: true,
-    }).start(() => {
+    }).start();
+
+    // Check if biometric authentication is required for delete operation
+    const authenticated =
+      await BiometricAuthService.authenticateForSensitiveOperation(
+        "delete this account",
+        biometricEnabled,
+      );
+
+    if (authenticated) {
       onDelete(coin.raw?.Wallet?.XPub);
-    });
+    }
   };
 
-  const isLoading =
-    coin.fiatAmount === undefined ||
-    coin.fiatAmount === null ||
-    Number.isNaN(coin.fiatAmount);
-
-  const changeIsPositive = coin.change24h >= 0;
+  const resetSwipe = () => {
+    Animated.spring(translateX, {
+      toValue: 0,
+      useNativeDriver: true,
+    }).start();
+  };
 
   return (
-    <View style={styles.cardWrapper}>
+    <View style={coinCardStyles.cardWrapper}>
       <Animated.View
-        style={[
-          styles.cardContainer,
-          { transform: [{ scale: pressAnim }, { translateX }] },
-        ]}
+        style={[coinCardStyles.cardContainer, { transform: [{ translateX }] }]}
         {...panResponder.panHandlers}
       >
-        <TouchableOpacity
-          style={styles.cardTouchable}
-          onPress={onPress}
-          onPressIn={handlePressIn}
-          onPressOut={handlePressOut}
-          activeOpacity={1}
+        <Animated.View
+          style={[
+            coinCardStyles.cardTouchableWrapper,
+            { transform: [{ scale: pressAnim }] },
+          ]}
         >
-          {/* Glassmorphism background */}
-          <View style={styles.glassBackground}>
-            {/* Gradient border effect */}
-            <LinearGradient
-              colors={[
-                "rgba(139, 92, 246, 0.3)",
-                "rgba(59, 130, 246, 0.3)",
-                "rgba(139, 92, 246, 0.1)",
-              ]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.gradientBorder}
-            />
-
-            {/* Card content */}
-            <View style={styles.cardContent}>
-              <View style={styles.row}>
-                {/* Coin Image with hexagon shape */}
-                <View style={styles.imageContainer}>
-                  <Svg width="48" height="48" viewBox="0 0 100 100">
-                    <Defs>
-                      <ClipPath id={`hexClip-${coin.symbol}`}>
-                        <Polygon points="50,8 85,28 85,72 50,92 15,72 15,28" />
-                      </ClipPath>
-                    </Defs>
-                    <Polygon
-                      points="50,8 85,28 85,72 50,92 15,72 15,28"
-                      fill="none"
-                      stroke="rgba(255, 255, 255, 0.15)"
-                      strokeWidth="1.5"
-                    />
-                    <SvgImage
-                      href={coin.image.uri || coin.image}
-                      x="0"
-                      y="5"
-                      width="100"
-                      height="90"
-                      clipPath={`url(#hexClip-${coin.symbol})`}
-                      preserveAspectRatio="xMidYMid slice"
-                    />
-                  </Svg>
-                </View>
-
-                <View style={styles.contentSection}>
-                  {/* Coin Name & Symbol */}
-                  <View style={styles.headerRow}>
-                    <ThemedText type="defaultSemiBold" style={styles.coinName}>
-                      {coin.name}
-                    </ThemedText>
+          <TouchableOpacity
+            style={coinCardStyles.cardTouchable}
+            onPress={() => {
+              resetSwipe();
+              onPress();
+            }}
+            onPressIn={animateIn}
+            onPressOut={animateOut}
+            activeOpacity={0.95}
+            delayPressIn={50}
+          >
+            <View style={coinCardStyles.modernBackground}>
+              {/* Card content */}
+              <View style={coinCardStyles.cardContent}>
+                <View style={coinCardStyles.row}>
+                  {/* Coin Image with simple circular design */}
+                  <View style={coinCardStyles.imageContainer}>
                     <View
                       style={[
-                        styles.symbolBadge,
-                        {
-                          backgroundColor: `${coin.color}20`,
-                          borderColor: `${coin.color}66`,
-                        },
+                        coinCardStyles.coinImageWrapper,
+                        { backgroundColor: `${coin.color}20` },
                       ]}
                     >
-                      <ThemedText
-                        style={[styles.symbolText, { color: coin.color }]}
-                      >
-                        {coin.symbol}
-                      </ThemedText>
+                      <Image
+                        source={
+                          typeof coin.image === "string"
+                            ? { uri: coin.image }
+                            : coin.image
+                        }
+                        style={coinCardStyles.coinImage}
+                        resizeMode="contain"
+                      />
                     </View>
                   </View>
 
-                  {/* Fiat Balance */}
-                  <View style={styles.balanceRow}>
-                    {isLoading ? (
-                      <SkeletonLine width={140} height={24} />
-                    ) : (
-                      <Animated.Text
-                        style={[styles.fiatAmount, { color: flashColor }]}
+                  <View style={coinCardStyles.contentSection}>
+                    {/* Coin Name & Symbol */}
+                    <View style={coinCardStyles.headerRow}>
+                      <ThemedText
+                        type="defaultSemiBold"
+                        style={coinCardStyles.coinName}
                       >
-                        {hideBalance
-                          ? "••••••"
-                          : formatCurrency(
-                              coin.fiatAmount || 0,
-                              coin.fiatCurrency,
-                            )}
-                      </Animated.Text>
-                    )}
-
-                    {!isLoading && (
-                      <TouchableOpacity
-                        onPress={() => setHideBalance(!hideBalance)}
-                        style={styles.eyeButton}
+                        {coin.name}
+                      </ThemedText>
+                      <View
+                        style={[
+                          coinCardStyles.symbolBadge,
+                          {
+                            backgroundColor: `${coin.color}20`,
+                            borderColor: `${coin.color}66`,
+                          },
+                        ]}
                       >
-                        <Feather
-                          name={hideBalance ? "eye-off" : "eye"}
-                          size={18}
-                          color="rgba(255, 255, 255, 0.6)"
-                        />
-                      </TouchableOpacity>
-                    )}
-                  </View>
+                        <ThemedText
+                          style={[
+                            coinCardStyles.symbolText,
+                            { color: coin.color },
+                          ]}
+                        >
+                          {coin.symbol}
+                        </ThemedText>
+                      </View>
+                    </View>
 
-                  {/* Coin Amount & 24h Change */}
-                  <View style={styles.detailsRow}>
-                    {isLoading ? (
-                      <>
-                        <SkeletonLine width={100} height={16} />
-                        <SkeletonLine
-                          width={80}
-                          height={16}
-                          style={{ marginLeft: 12 }}
-                        />
-                      </>
-                    ) : (
-                      <>
-                        <ThemedText style={styles.coinAmount}>
+                    {/* Fiat Balance */}
+                    <View style={coinCardStyles.balanceRow}>
+                      {isLoading ? (
+                        <SkeletonLine width={140} height={24} />
+                      ) : (
+                        <Animated.Text
+                          style={[
+                            coinCardStyles.fiatAmount,
+                            { color: flashColor },
+                          ]}
+                          numberOfLines={1}
+                          adjustsFontSizeToFit
+                          minimumFontScale={0.6}
+                        >
                           {hideBalance
                             ? "••••••"
-                            : `${coin.coinAmount} ${coin.symbol}`}
-                        </ThemedText>
+                            : formatCurrency(
+                                coin.fiatAmount || 0,
+                                coin.fiatCurrency,
+                                "en-CA",
+                                (coin.fiatAmount || 0) >= 100000 ||
+                                  (numberFormat === "default" &&
+                                    (coin.fiatAmount || 0) >= 10000)
+                                  ? "compact"
+                                  : numberFormat,
+                              )}
+                        </Animated.Text>
+                      )}
+                    </View>
 
-                        {coin.change24h !== undefined && (
-                          <View
-                            style={[
-                              styles.changeBadge,
-                              changeIsPositive
-                                ? styles.changeBadgePositive
-                                : styles.changeBadgeNegative,
-                            ]}
+                    {/* Coin Amount & 24h Change */}
+                    <View style={coinCardStyles.detailsRow}>
+                      {isLoading ? (
+                        <>
+                          <SkeletonLine width={100} height={16} />
+                          <SkeletonLine
+                            width={80}
+                            height={16}
+                            style={{ marginLeft: theme.spacing.md }}
+                          />
+                        </>
+                      ) : (
+                        <>
+                          <ThemedText
+                            style={coinCardStyles.coinAmount}
+                            numberOfLines={1}
+                            adjustsFontSizeToFit
+                            minimumFontScale={0.7}
                           >
-                            <MaterialIcons
-                              name={
-                                changeIsPositive
-                                  ? "trending-up"
-                                  : "trending-down"
-                              }
-                              size={14}
-                              color={changeIsPositive ? "#4ade80" : "#f87171"}
-                            />
-                            <ThemedText
-                              style={[
-                                styles.changeText,
-                                {
-                                  color: changeIsPositive
-                                    ? "#4ade80"
-                                    : "#f87171",
-                                },
-                              ]}
-                            >
-                              {hideBalance
-                                ? "••••"
-                                : `${changeIsPositive ? "+" : ""}${coin.change24h.toFixed(2)} ${coin.fiatCurrency}`}
-                            </ThemedText>
-                          </View>
-                        )}
-                      </>
-                    )}
+                            {hideBalance
+                              ? "••••••"
+                              : formatCryptoAmount(
+                                  coin.coinAmount || 0,
+                                  coin.symbol,
+                                  8,
+                                  (typeof coin.coinAmount === "number" &&
+                                    coin.coinAmount >= 100000) ||
+                                    (typeof coin.coinAmount === "string" &&
+                                      parseFloat(coin.coinAmount) >= 100000) ||
+                                    (numberFormat === "default" &&
+                                      ((typeof coin.coinAmount === "number" &&
+                                        coin.coinAmount >= 10000) ||
+                                        (typeof coin.coinAmount === "string" &&
+                                          parseFloat(coin.coinAmount) >=
+                                            10000)))
+                                    ? "compact"
+                                    : numberFormat,
+                                )}
+                          </ThemedText>
+
+                          {coin.change24h !== undefined &&
+                            coin.change24h !== null && (
+                              <View
+                                style={[
+                                  coinCardStyles.changeBadge,
+                                  changeIsPositive
+                                    ? coinCardStyles.changeBadgePositive
+                                    : changeIsNegative
+                                      ? coinCardStyles.changeBadgeNegative
+                                      : coinCardStyles.changeBadgeNeutral,
+                                ]}
+                              >
+                                <MaterialIcons
+                                  name={
+                                    changeIsPositive
+                                      ? "trending-up"
+                                      : changeIsNegative
+                                        ? "trending-down"
+                                        : "trending-flat"
+                                  }
+                                  size={14}
+                                  color={
+                                    changeIsPositive
+                                      ? theme.colors.success
+                                      : changeIsNegative
+                                        ? theme.colors.error
+                                        : theme.colors.text.secondary
+                                  }
+                                />
+                                <ThemedText
+                                  style={[
+                                    coinCardStyles.changeText,
+                                    {
+                                      color: changeIsPositive
+                                        ? theme.colors.success
+                                        : changeIsNegative
+                                          ? theme.colors.error
+                                          : theme.colors.text.secondary,
+                                    },
+                                  ]}
+                                  numberOfLines={1}
+                                  adjustsFontSizeToFit
+                                  minimumFontScale={0.8}
+                                >
+                                  {hideBalance
+                                    ? "••••"
+                                    : `${changeIsPositive ? "+" : ""}${formatCurrency(
+                                        Math.abs(change24h),
+                                        coin.fiatCurrency,
+                                        "en-CA",
+                                        Math.abs(change24h) >= 100000 ||
+                                          (numberFormat === "default" &&
+                                            Math.abs(change24h) >= 1000)
+                                          ? "compact"
+                                          : numberFormat,
+                                      )}`}
+                                </ThemedText>
+                              </View>
+                            )}
+                        </>
+                      )}
+                    </View>
                   </View>
                 </View>
               </View>
             </View>
-          </View>
-        </TouchableOpacity>
+          </TouchableOpacity>
+        </Animated.View>
       </Animated.View>
 
-      {/* Delete button - only visible when swiped */}
+      {/* Eye button - positioned to not interfere with swipe */}
+      {!isLoading && (
+        <View style={coinCardStyles.eyeButtonContainer}>
+          <TouchableOpacity
+            onPress={() => setHideBalance(!hideBalance)}
+            style={coinCardStyles.cleanEyeButton}
+          >
+            <Feather
+              name={hideBalance ? "eye-off" : "eye"}
+              size={16}
+              color={theme.colors.text.secondary}
+            />
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Slide-to-delete background - revealed when swiping left */}
       <Animated.View
         style={[
-          styles.deleteBackground,
+          coinCardStyles.slideDeleteBackground,
           {
             opacity: translateX.interpolate({
-              inputRange: [-80, 0],
-              outputRange: [1, 0],
+              inputRange: [-100, -20, 0],
+              outputRange: [1, 0.3, 0],
               extrapolate: "clamp",
             }),
+            transform: [
+              {
+                translateX: translateX.interpolate({
+                  inputRange: [-100, 0],
+                  outputRange: [0, 100],
+                  extrapolate: "clamp",
+                }),
+              },
+            ],
           },
         ]}
       >
-        <TouchableOpacity onPress={handleDelete} style={styles.deleteAction}>
-          <MaterialIcons name="delete-outline" size={28} color="#ffffff" />
+        <TouchableOpacity
+          onPress={handleDelete}
+          style={coinCardStyles.slideDeleteAction}
+          activeOpacity={0.8}
+        >
+          <View style={coinCardStyles.deleteIconContainer}>
+            <MaterialIcons
+              name="delete-outline"
+              size={32}
+              color={theme.colors.error}
+            />
+          </View>
+          <ThemedText style={coinCardStyles.slideDeleteText}>Delete</ThemedText>
         </TouchableOpacity>
       </Animated.View>
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  cardWrapper: {
-    marginBottom: 12,
-    position: "relative",
-  },
-  cardContainer: {
-    position: "relative",
-    zIndex: 2,
-  },
-  cardTouchable: {
-    backgroundColor: "#121212",
-    borderRadius: 16,
-  },
-  glassBackground: {
-    backgroundColor: "rgba(30, 30, 30, 0.6)",
-    borderRadius: 16,
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.1)",
-  },
-  gradientBorder: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    height: 2,
-  },
-  cardContent: {
-    padding: 14,
-  },
-  deleteBackground: {
-    position: "absolute",
-    right: 0,
-    top: 0,
-    bottom: 0,
-    width: 80,
-    backgroundColor: "#f87171",
-    borderRadius: 16,
-    justifyContent: "center",
-    alignItems: "center",
-    zIndex: 1,
-  },
-  deleteAction: {
-    width: "100%",
-    height: "100%",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  row: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  imageContainer: {
-    position: "relative",
-    marginRight: 12,
-    width: 48,
-    height: 48,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  contentSection: {
-    flex: 1,
-  },
-  headerRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 8,
-  },
-  coinName: {
-    color: "#ffffff",
-    fontSize: 16,
-    fontWeight: "600",
-    marginRight: 8,
-  },
-  symbolBadge: {
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 6,
-    borderWidth: 1,
-  },
-  symbolText: {
-    fontSize: 11,
-    fontWeight: "700",
-  },
-  balanceRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 6,
-  },
-  fiatAmount: {
-    fontSize: 20,
-    fontWeight: "700",
-    color: "#ffffff",
-    letterSpacing: 0.5,
-  },
-  eyeButton: {
-    marginLeft: 8,
-    padding: 4,
-  },
-  detailsRow: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  coinAmount: {
-    fontSize: 13,
-    color: "rgba(255, 255, 255, 0.6)",
-    fontWeight: "500",
-  },
-  changeBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 6,
-    paddingVertical: 3,
-    borderRadius: 8,
-    marginLeft: 10,
-  },
-  changeBadgePositive: {
-    backgroundColor: "rgba(74, 222, 128, 0.1)",
-  },
-  changeBadgeNegative: {
-    backgroundColor: "rgba(248, 113, 113, 0.1)",
-  },
-  changeText: {
-    fontSize: 11,
-    fontWeight: "600",
-    marginLeft: 3,
-  },
-});

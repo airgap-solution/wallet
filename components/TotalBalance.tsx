@@ -1,140 +1,90 @@
-import React, { useState, useRef, useEffect } from "react";
-import {
-  View,
-  TouchableOpacity,
-  StyleSheet,
-  Animated,
-  Easing,
-} from "react-native";
+import React, { useState } from "react";
+import { View, TouchableOpacity, Animated, Dimensions } from "react-native";
 import { Feather, MaterialIcons } from "@expo/vector-icons";
+
 import { ThemedText } from "./ThemedText";
-import { LinearGradient } from "expo-linear-gradient";
-
-const formatCurrency = (amount: number, currency: string) =>
-  new Intl.NumberFormat("en-CA", {
-    style: "currency",
-    currency,
-    maximumFractionDigits: 2,
-    minimumFractionDigits: 2,
-  }).format(amount);
-
-type TotalBalanceProps = {
-  total: number;
-  changePercent: number;
-  fiat: string;
-};
-
-// Enhanced shimmer skeleton
-const SkeletonLine = ({ width, height, style }: any) => {
-  const shimmer = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(shimmer, {
-          toValue: 1,
-          duration: 1500,
-          easing: Easing.ease,
-          useNativeDriver: false,
-        }),
-        Animated.timing(shimmer, {
-          toValue: 0,
-          duration: 1500,
-          easing: Easing.ease,
-          useNativeDriver: false,
-        }),
-      ]),
-    ).start();
-  }, []);
-
-  const backgroundColor = shimmer.interpolate({
-    inputRange: [0, 1],
-    outputRange: ["rgba(255, 255, 255, 0.05)", "rgba(255, 255, 255, 0.15)"],
-  });
-
-  return (
-    <Animated.View
-      style={[
-        {
-          width,
-          height,
-          borderRadius: 12,
-          backgroundColor,
-        },
-        style,
-      ]}
-    />
-  );
-};
+import { SkeletonLine } from "./common/SkeletonLoader";
+import { formatCurrency } from "@/utils/formatters";
+import { usePressAnimation } from "@/utils/animations";
+import { useAppSettings } from "@/contexts/AppSettingsContext";
+import { totalBalanceStyles } from "@/styles/totalBalance.styles";
+import { theme } from "@/theme";
+import type { TotalBalanceProps } from "@/types";
 
 export default function TotalBalance({
   total,
   changePercent,
   fiat,
+  isLoading = false,
 }: TotalBalanceProps) {
   const [hide, setHide] = useState(false);
-  const scaleAnim = useRef(new Animated.Value(1)).current;
+  const { numberFormat } = useAppSettings();
 
-  const color = changePercent >= 0 ? "#4ade80" : "#f87171";
-  const isZero = total === 0;
-  const changeIsPositive = changePercent >= 0;
+  const {
+    animatedValue: scaleAnim,
+    animateIn,
+    animateOut,
+  } = usePressAnimation();
+
+  const isActuallyLoading = isLoading;
+  const changeIsPositive = changePercent > 0;
+  const changeIsNegative = changePercent < 0;
+  const changeIsZeroPercent = changePercent === 0;
+  const changeColor = changeIsPositive
+    ? theme.colors.success
+    : changeIsNegative
+      ? theme.colors.error
+      : theme.colors.text.secondary;
 
   const handleEyePress = () => {
-    Animated.sequence([
-      Animated.timing(scaleAnim, {
-        toValue: 0.9,
-        duration: 100,
-        useNativeDriver: true,
-      }),
-      Animated.spring(scaleAnim, {
-        toValue: 1,
-        friction: 3,
-        tension: 40,
-        useNativeDriver: true,
-      }),
-    ]).start();
-    setHide(!hide);
+    animateIn();
+    setTimeout(() => {
+      animateOut();
+      setHide(!hide);
+    }, 100);
   };
 
   return (
-    <View style={styles.container}>
-      {/* Glassmorphic card */}
-      <View style={styles.balanceCard}>
-        {/* Gradient background */}
-        <LinearGradient
-          colors={[
-            "rgba(139, 92, 246, 0.15)",
-            "rgba(59, 130, 246, 0.15)",
-            "rgba(139, 92, 246, 0.05)",
-          ]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={styles.gradientBackground}
-        />
+    <View style={totalBalanceStyles.container}>
+      <View style={totalBalanceStyles.balanceCard}>
+        {/* Modern gray background */}
+        <View style={totalBalanceStyles.grayBackground} />
 
         {/* Content */}
-        <View style={styles.cardContent}>
+        <View style={totalBalanceStyles.cardContent}>
           {/* Label */}
-          <ThemedText style={styles.label}>Total Portfolio Value</ThemedText>
+          <ThemedText style={totalBalanceStyles.label}>
+            Total Portfolio Value
+          </ThemedText>
 
           {/* Balance Row */}
-          <View style={styles.balanceRow}>
-            {isZero ? (
+          <View style={totalBalanceStyles.balanceRow}>
+            {isActuallyLoading ? (
               <SkeletonLine width={220} height={48} />
             ) : (
               <>
-                <ThemedText type="title" style={styles.balance}>
-                  {hide ? "••••••••" : formatCurrency(total, fiat)}
+                <ThemedText type="title" style={totalBalanceStyles.balance}>
+                  {hide
+                    ? "••••••••"
+                    : formatCurrency(
+                        total,
+                        fiat,
+                        "en-CA",
+                        total >= 100000 ||
+                          (numberFormat === "default" && total >= 10000)
+                          ? "compact"
+                          : numberFormat,
+                      )}
                 </ThemedText>
                 <Animated.View style={{ transform: [{ scale: scaleAnim }] }}>
                   <TouchableOpacity
                     onPress={handleEyePress}
-                    style={styles.eyeButton}
+                    style={totalBalanceStyles.cleanEyeButton}
                   >
                     <Feather
                       name={hide ? "eye-off" : "eye"}
-                      size={24}
-                      color="rgba(255, 255, 255, 0.7)"
+                      size={16}
+                      color={theme.colors.text.secondary}
                     />
                   </TouchableOpacity>
                 </Animated.View>
@@ -143,111 +93,45 @@ export default function TotalBalance({
           </View>
 
           {/* Change Indicator */}
-          {!isZero && (
-            <View style={styles.changeContainer}>
+          {!isActuallyLoading && (
+            <View style={totalBalanceStyles.changeContainer}>
               <View
                 style={[
-                  styles.changeBadge,
+                  totalBalanceStyles.changeBadge,
                   changeIsPositive
-                    ? styles.changeBadgePositive
-                    : styles.changeBadgeNegative,
+                    ? totalBalanceStyles.changeBadgePositive
+                    : changeIsNegative
+                      ? totalBalanceStyles.changeBadgeNegative
+                      : totalBalanceStyles.changeBadgeNeutral,
                 ]}
               >
                 <MaterialIcons
-                  name={changeIsPositive ? "trending-up" : "trending-down"}
-                  size={18}
-                  color={color}
+                  name={
+                    changeIsPositive
+                      ? "trending-up"
+                      : changeIsNegative
+                        ? "trending-down"
+                        : "trending-flat"
+                  }
+                  size={14}
+                  color={changeColor}
                 />
-                <ThemedText style={[styles.changePercent, { color }]}>
+                <ThemedText
+                  style={[
+                    totalBalanceStyles.changePercent,
+                    { color: changeColor },
+                  ]}
+                >
                   {Math.abs(changePercent).toFixed(2)}%
                 </ThemedText>
-                <ThemedText style={styles.changeLabel}>today</ThemedText>
+                <ThemedText style={totalBalanceStyles.changeLabel}>
+                  today
+                </ThemedText>
               </View>
             </View>
           )}
         </View>
-
-        {/* Decorative elements */}
-        <View style={styles.decorativeCircle1} />
-        <View style={styles.decorativeCircle2} />
       </View>
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    alignItems: "center",
-    marginBottom: 24,
-    paddingHorizontal: 16,
-  },
-  balanceCard: {
-    position: "relative",
-    width: "100%",
-    backgroundColor: "rgba(30, 30, 30, 0.6)",
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.1)",
-  },
-  cardContent: {
-    padding: 24,
-    alignItems: "center",
-  },
-  label: {
-    fontSize: 14,
-    color: "rgba(255, 255, 255, 0.6)",
-    fontWeight: "600",
-    textTransform: "uppercase",
-    letterSpacing: 1.2,
-    marginBottom: 12,
-  },
-  balanceRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 16,
-  },
-  balance: {
-    fontSize: 40,
-    fontWeight: "800",
-    color: "#ffffff",
-    letterSpacing: -0.5,
-  },
-  eyeButton: {
-    marginLeft: 16,
-    padding: 8,
-    backgroundColor: "rgba(255, 255, 255, 0.05)",
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.1)",
-  },
-  changeContainer: {
-    alignItems: "center",
-  },
-  changeBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 12,
-    gap: 6,
-  },
-  changeBadgePositive: {
-    backgroundColor: "rgba(74, 222, 128, 0.15)",
-    borderWidth: 1,
-    borderColor: "rgba(74, 222, 128, 0.3)",
-  },
-  changeBadgeNegative: {
-    backgroundColor: "rgba(248, 113, 113, 0.15)",
-    borderWidth: 1,
-    borderColor: "rgba(248, 113, 113, 0.3)",
-  },
-  changePercent: {
-    fontSize: 16,
-    fontWeight: "700",
-  },
-  changeLabel: {
-    fontSize: 14,
-    color: "rgba(255, 255, 255, 0.5)",
-    fontWeight: "500",
-  },
-});

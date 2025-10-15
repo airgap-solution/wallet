@@ -63,16 +63,6 @@ export const AccountsProvider: React.FC<{ children: ReactNode }> = ({
     }
   };
 
-  const saveAccounts = async (newAccounts: Account[]) => {
-    try {
-      console.log("Saving accounts:", newAccounts);
-      setAccounts(newAccounts);
-      await AsyncStorage.setItem("accountsData", JSON.stringify(newAccounts));
-    } catch (e) {
-      console.error("Failed to save accounts", e);
-    }
-  };
-
   const addOrUpdateAccount = async (account: Account) => {
     console.log("Adding/updating account:", account);
     setAccounts((prev) => {
