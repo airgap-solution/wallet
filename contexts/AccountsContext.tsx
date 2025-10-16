@@ -6,13 +6,14 @@ import React, {
   ReactNode,
 } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { sanitizeAccount } from "@/utils/typeUtils";
 
 export type WalletInfo = {
   DerivationPath: string;
   ChainCode: string | Uint8Array;
   Name: string;
-  Internal1: boolean;
-  Internal2: boolean;
+  Internal1: boolean | string;
+  Internal2: boolean | string;
   SomeBytes: string | Uint8Array;
   XPub: string;
 };
@@ -53,7 +54,11 @@ export const AccountsProvider: React.FC<{ children: ReactNode }> = ({
       if (saved) {
         const parsed = JSON.parse(saved);
         console.log("Reloaded accounts:", parsed);
-        setAccounts(parsed);
+        // Sanitize accounts to prevent type casting errors
+        const sanitizedAccounts = parsed.map((account: any) =>
+          sanitizeAccount(account),
+        );
+        setAccounts(sanitizedAccounts);
       } else {
         console.log("No saved accounts found, setting empty array");
         setAccounts([]);
@@ -65,11 +70,13 @@ export const AccountsProvider: React.FC<{ children: ReactNode }> = ({
 
   const addOrUpdateAccount = async (account: Account) => {
     console.log("Adding/updating account:", account);
+    // Sanitize the account before adding/updating
+    const sanitizedAccount = sanitizeAccount(account);
     setAccounts((prev) => {
       const filtered = prev.filter(
-        (a) => a.Wallet.XPub !== account.Wallet.XPub,
+        (a) => a.Wallet.XPub !== sanitizedAccount.Wallet.XPub,
       );
-      const updated = [...filtered, account];
+      const updated = [...filtered, sanitizedAccount];
       console.log("Updated accounts list:", updated);
       AsyncStorage.setItem("accountsData", JSON.stringify(updated));
       return updated;

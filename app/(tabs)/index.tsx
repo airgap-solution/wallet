@@ -35,8 +35,10 @@ import {
 } from "@/constants/CoinMeta";
 import { generateId, isEmpty } from "@/utils/formatters";
 import { usePressAnimation } from "@/utils/animations";
+import { sanitizeBalanceResponse } from "@/utils/typeUtils";
 
-import type { MappedAccount, BalanceApiResponse } from "@/types";
+import type { MappedAccount } from "@/types";
+import type { BalancesPostRequest } from "@airgap-solution/crypto-wallet-rest";
 
 export default function HomeScreen() {
   const { accounts, addOrUpdateAccount, deleteAccount } = useAccounts();
@@ -53,7 +55,7 @@ export default function HomeScreen() {
   const [selectedCoin, setSelectedCoin] = useState<MappedAccount | null>(null);
   const [transactionModalVisible, setTransactionModalVisible] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading] = useState(false);
   const [hasInitialLoad, setHasInitialLoad] = useState(false);
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -160,58 +162,7 @@ export default function HomeScreen() {
     hasInitialLoad,
   ]);
 
-  // Load balance data for a single account
-  const loadSingleBalance = useCallback(
-    async (acc: any): Promise<MappedAccount> => {
-      const meta = getCoinMeta(acc.Type);
-      const symbolForApi = acc.Type.split("_")[0].toUpperCase();
-
-      try {
-        const response = await cryptoApi.balanceGet(
-          symbolForApi,
-          acc.Wallet.XPub,
-          fiat.toUpperCase(),
-        );
-
-        const data = response.data as BalanceApiResponse;
-
-        return {
-          id: acc.Wallet.XPub,
-          name: meta.name,
-          symbol: meta.symbol,
-          image: meta.image,
-          color: meta.color,
-          fiatAmount: parseFloat((data.fiat_value ?? 0).toFixed(10)),
-          coinAmount: parseFloat(Number(data.crypto_balance ?? 0).toFixed(10)),
-          fiatCurrency: data.fiat_symbol ?? fiat,
-          change24h: data.change24h ?? 0,
-          raw: acc,
-        };
-      } catch (apiError) {
-        console.warn(
-          `Failed to fetch balance for ${acc.Wallet.XPub}:`,
-          apiError,
-        );
-
-        // Return placeholder data on API failure
-        return {
-          id: acc.Wallet.XPub,
-          name: meta.name,
-          symbol: meta.symbol,
-          image: meta.image,
-          color: meta.color,
-          fiatAmount: 0,
-          coinAmount: 0,
-          fiatCurrency: fiat,
-          change24h: 0,
-          raw: acc,
-        };
-      }
-    },
-    [fiat],
-  );
-
-  // Load balance data from API
+  // Load balance data from API using batch balancesPost request
   const loadBalances = useCallback(
     async (silent = false) => {
       // Skip loading if we're in the middle of account operations
@@ -222,9 +173,84 @@ export default function HomeScreen() {
       }
 
       try {
-        const results = await Promise.all(
-          accounts.map((acc) => loadSingleBalance(acc)),
-        );
+        // If no accounts, clear data and return
+        if (accounts.length === 0) {
+          setAllMappedAccounts([]);
+          setMappedAccounts([]);
+          setError(null);
+          return;
+        }
+
+        // Prepare batch request for balancesPost
+        const batchRequest: BalancesPostRequest = {
+          requests: accounts.map((acc) => ({
+            crypto_symbol: acc.Type.split("_")[0].toUpperCase(),
+            address: acc.Wallet.XPub,
+            fiat_symbol: fiat.toUpperCase(),
+          })),
+          fiat_symbol: fiat.toUpperCase(),
+        };
+
+        // Make single batch API call using balancesPost
+        const response = await cryptoApi.balancesPost(batchRequest);
+        const batchData = response.data;
+
+        console.log("Batch API response:", JSON.stringify(batchData, null, 2));
+
+        const results: MappedAccount[] = [];
+
+        // Process batch results
+        if (batchData.results) {
+          for (const result of batchData.results) {
+            console.log("Processing result:", JSON.stringify(result, null, 2));
+
+            // Find the corresponding account
+            const account = accounts.find(
+              (acc) => acc.Wallet.XPub === result.address,
+            );
+            if (!account) continue;
+
+            const meta = getCoinMeta(account.Type);
+
+            // Sanitize the result data to prevent casting errors
+            const sanitizedResult = sanitizeBalanceResponse(result);
+
+            if (sanitizedResult.error) {
+              console.warn(
+                `Batch request failed for ${sanitizedResult.address}: ${sanitizedResult.error}`,
+              );
+              // Add placeholder data for failed requests
+              results.push({
+                id: account.Wallet.XPub,
+                name: meta.name,
+                symbol: meta.symbol,
+                image: meta.image,
+                color: meta.color,
+                fiatAmount: 0,
+                coinAmount: 0,
+                fiatCurrency: fiat,
+                change24h: 0,
+                raw: account,
+              });
+            } else {
+              // Process successful result with type safety
+              results.push({
+                id: account.Wallet.XPub,
+                name: meta.name,
+                symbol: meta.symbol,
+                image: meta.image,
+                color: meta.color,
+                fiatAmount: parseFloat(sanitizedResult.fiat_value.toFixed(10)),
+                coinAmount: parseFloat(
+                  sanitizedResult.crypto_balance.toFixed(10),
+                ),
+                fiatCurrency: sanitizedResult.fiat_symbol || fiat,
+                change24h: sanitizedResult.change24h,
+                raw: account,
+              });
+            }
+          }
+        }
 
         // Sort by fiat amount (highest first)
         results.sort((a, b) => (b.fiatAmount ?? 0) - (a.fiatAmount ?? 0));
@@ -243,6 +269,7 @@ export default function HomeScreen() {
         setError(null);
       } catch (err) {
         console.error("Failed to load balances:", err);
+        console.error("Error details:", JSON.stringify(err, null, 2));
         setError("Failed to load account balances");
       } finally {
         setRefreshing(false);
@@ -253,9 +280,9 @@ export default function HomeScreen() {
       accounts,
       hideSmallBalances,
       smallBalanceThreshold,
-      loadSingleBalance,
       isDeletingAccount,
       isAddingAccount,
+      fiat,
     ],
   );
 
@@ -264,49 +291,12 @@ export default function HomeScreen() {
     if (isDeletingAccount || isAddingAccount) return;
 
     try {
-      const results = await Promise.all(
-        accounts.map((acc) => loadSingleBalance(acc)),
-      );
-
-      // Update existing accounts without changing their loading state
-      setAllMappedAccounts((prev) => {
-        const updated = prev.map((existing) => {
-          const newData = results.find((result) => result.id === existing.id);
-          return newData ? newData : existing;
-        });
-
-        updated.sort((a, b) => (b.fiatAmount ?? 0) - (a.fiatAmount ?? 0));
-        return updated;
-      });
-
-      setMappedAccounts((prev) => {
-        const updated = prev.map((existing) => {
-          const newData = results.find((result) => result.id === existing.id);
-          return newData ? newData : existing;
-        });
-
-        const filtered = hideSmallBalances
-          ? updated.filter(
-              (account) => (account.fiatAmount ?? 0) >= smallBalanceThreshold,
-            )
-          : updated;
-
-        filtered.sort((a, b) => (b.fiatAmount ?? 0) - (a.fiatAmount ?? 0));
-        return filtered;
-      });
-
-      setError(null);
+      // Use the same batch logic but silently
+      await loadBalances(true);
     } catch (err) {
       console.error("Failed to refresh balances:", err);
     }
-  }, [
-    accounts,
-    hideSmallBalances,
-    smallBalanceThreshold,
-    loadSingleBalance,
-    isDeletingAccount,
-    isAddingAccount,
-  ]);
+  }, [loadBalances, isDeletingAccount, isAddingAccount]);
 
   // Load balances when accounts are first loaded
   useEffect(() => {
@@ -516,25 +506,72 @@ export default function HomeScreen() {
     try {
       await addOrUpdateAccount(newAccount);
 
-      // Fetch balance for ONLY this new account in background
-      const newAccountData = await loadSingleBalance(newAccount);
-      setAllMappedAccounts((prev) =>
-        prev.map((account) =>
-          account.id === newAccount.Wallet.XPub ? newAccountData : account,
-        ),
+      // Fetch balance for ONLY this new account using balancesPost
+      const batchRequest: BalancesPostRequest = {
+        requests: [
+          {
+            crypto_symbol: newAccount.Type.split("_")[0].toUpperCase(),
+            address: newAccount.Wallet.XPub,
+            fiat_symbol: fiat.toUpperCase(),
+          },
+        ],
+        fiat_symbol: fiat.toUpperCase(),
+      };
+
+      const response = await cryptoApi.balancesPost(batchRequest);
+      const batchData = response.data;
+
+      console.log(
+        "Single account API response:",
+        JSON.stringify(batchData, null, 2),
       );
-      setMappedAccounts((prev) => {
-        const updated = prev.map((account) =>
-          account.id === newAccount.Wallet.XPub ? newAccountData : account,
+
+      if (batchData.results && batchData.results.length > 0) {
+        const result = batchData.results[0];
+        const meta = getCoinMeta(newAccount.Type);
+
+        // Sanitize the result data to prevent casting errors
+        const sanitizedResult = sanitizeBalanceResponse(result);
+
+        const newAccountData: MappedAccount = {
+          id: newAccount.Wallet.XPub,
+          name: meta.name,
+          symbol: meta.symbol,
+          image: meta.image,
+          color: meta.color,
+          fiatAmount: sanitizedResult.error
+            ? 0
+            : parseFloat(sanitizedResult.fiat_value.toFixed(10)),
+          coinAmount: sanitizedResult.error
+            ? 0
+            : parseFloat(sanitizedResult.crypto_balance.toFixed(10)),
+          fiatCurrency: sanitizedResult.fiat_symbol || fiat,
+          change24h: sanitizedResult.error ? 0 : sanitizedResult.change24h,
+          raw: newAccount,
+        };
+
+        setAllMappedAccounts((prev) =>
+          prev.map((account) =>
+            account.id === newAccount.Wallet.XPub ? newAccountData : account,
+          ),
         );
-        return hideSmallBalances
-          ? updated.filter(
-              (account) => (account.fiatAmount ?? 0) >= smallBalanceThreshold,
-            )
-          : updated;
-      });
+        setMappedAccounts((prev) => {
+          const updated = prev.map((account) =>
+            account.id === newAccount.Wallet.XPub ? newAccountData : account,
+          );
+          return hideSmallBalances
+            ? updated.filter(
+                (account) => (account.fiatAmount ?? 0) >= smallBalanceThreshold,
+              )
+            : updated;
+        });
+      }
     } catch (error) {
       console.error("Failed to add account:", error);
+      console.error(
+        "Add account error details:",
+        JSON.stringify(error, null, 2),
+      );
     } finally {
       setIsAddingAccount(false);
     }
@@ -544,7 +581,6 @@ export default function HomeScreen() {
     allMappedAccounts,
     addOrUpdateAccount,
     fiat,
-    loadSingleBalance,
     hideSmallBalances,
     smallBalanceThreshold,
     isAddingAccount,

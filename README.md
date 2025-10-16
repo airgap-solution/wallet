@@ -107,7 +107,7 @@ wallet/
 - **Async Storage**: Local data persistence
 - **React Native Reanimated**: Smooth animations
 - **Expo Linear Gradient**: UI gradients
-- **Crypto APIs**: Real-time balance and price data
+- **Crypto APIs**: Real-time balance and price data with optimized batch requests
 
 ### Architecture & Code Quality
 
@@ -183,8 +183,9 @@ App
 ### Data Flow
 
 1. **Account Management**: Add/remove cryptocurrency accounts with validation
-2. **Balance Fetching**: Real-time API calls with automatic retry logic
+2. **Balance Fetching**: Optimized batch API calls with automatic fallback and retry logic
 3. **UI Updates**: Reactive updates with skeleton loading and error states
+4. **API Optimization**: Single batch request for all account balances instead of individual calls
 4. **Persistence**: Automatic saving to AsyncStorage with error handling
 5. **State Management**: Context API with optimized re-renders
 

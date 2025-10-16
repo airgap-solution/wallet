@@ -7,8 +7,8 @@ export interface WalletInfo {
   DerivationPath: string;
   ChainCode: string | Uint8Array;
   Name: string;
-  Internal1: boolean;
-  Internal2: boolean;
+  Internal1: boolean | string;
+  Internal2: boolean | string;
   SomeBytes: string | Uint8Array;
   XPub: string;
 }
